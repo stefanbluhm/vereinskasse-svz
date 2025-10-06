@@ -2,95 +2,106 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabase";
 import { fmtEUR } from "../lib/currency";
 import { todayKey } from "../lib/dates";
-import { addToTagesartikel } from "../lib/tagesartikel";
+
+/** Helfer für Rundung */
+const toNum = (v) => {
+  const n = Number(String(v ?? "").replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+};
 
 export default function Deckel() {
   const [produkte, setProdukte] = useState([]);
-  const [korb, setKorb] = useState({});        // {produkt_id: {menge, preis}}
-  const [gegeben, setGegeben] = useState("");  // Eingabe-String
-  const [restInput, setRestInput] = useState(""); // Eingabe-String
+  const [korb, setKorb] = useState({}); // {produkt_id: {anzahl, preis, name}}
+  const [gegeben, setGegeben] = useState("");
+  const [restInput, setRestInput] = useState("");
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
 
   useEffect(() => {
-    supabase.from("produkte").select("*").order("name", { ascending: true })
-      .then(({ data, error }) => error ? setErr(error.message) : setProdukte(data ?? []));
+    (async () => {
+      const { data, error } = await supabase
+        .from("produkte").select("*")
+        .order("name", { ascending: true });
+      if (error) setErr(error.message);
+      else setProdukte(data ?? []);
+    })();
   }, []);
 
-  const summe = useMemo(
-    () => Object.values(korb).reduce((a, b) => a + b.menge * b.preis, 0),
-    [korb]
-  );
+  const summe = useMemo(() =>
+    Object.values(korb).reduce((a, b) => a + b.anzahl * b.preis, 0),
+  [korb]);
 
-  // numerische Ableitungen aus Eingaben
-  const numGegeben = useMemo(() => {
-    const n = Number(String(gegeben).replace(",", "."));
-    return isFinite(n) && n > 0 ? n : 0;
-  }, [gegeben]);
-
-  const numRest = useMemo(() => {
-    const n = Number(String(restInput).replace(",", "."));
-    if (!isFinite(n) || n < 0) return 0;
-    return Math.min(n, summe);
-  }, [restInput, summe]);
-
-  const zuZahlen = useMemo(() => Math.max(0, summe - numRest), [summe, numRest]);
-  const trinkgeld = useMemo(() => Math.max(0, numGegeben - zuZahlen), [numGegeben, zuZahlen]);
-
-  // ⬇️ Auto-Befüllung: wenn „gegeben“ kleiner als zu zahlen, Rest = Summe - gegeben
-  useEffect(() => {
-    if (summe <= 0) return;
-    const berechnet = Math.max(0, summe - numGegeben);
-    // nur setzen, wenn es wirklich kleiner ist und der User den Rest nicht manuell überschreibt
-    const jetzt = Number(String(restInput).replace(",", "."));
-    const aktuell = isFinite(jetzt) ? jetzt : 0;
-    if (numGegeben > 0 && berechnet !== aktuell) {
-      setRestInput(berechnet.toFixed(2).replace(".", ","));
+  // Auto-Rest: wenn gegeben < zu zahlen, fülle Rest automatisch
+  const restAuto = useMemo(() => {
+    const g = toNum(gegeben);
+    // Rest ist der Teil, der NICHT bezahlt wurde (Papierdeckel)
+    const vorlZahlen = Math.max(0, summe - toNum(restInput));
+    if (g > 0 && g < vorlZahlen) {
+      return Math.max(0, summe - g);
     }
-  }, [numGegeben, summe]); // bewusst restInput NICHT als dependency
+    return toNum(restInput);
+  }, [gegeben, restInput, summe]);
+
+  const zuZahlen = useMemo(() =>
+    Math.max(0, summe - restAuto),
+  [summe, restAuto]);
 
   const add = (p) =>
-    setKorb((k) => ({ ...k, [p.id]: { menge: (k[p.id]?.menge ?? 0) + 1, preis: p.preis } }));
+    setKorb((k) => ({
+      ...k,
+      [p.id]: { name: p.name, preis: p.preis, anzahl: (k[p.id]?.anzahl ?? 0) + 1 },
+    }));
 
   const sub = (p) =>
     setKorb((k) => {
-      const cur = k[p.id]?.menge ?? 0;
+      const cur = k[p.id]?.anzahl ?? 0;
       if (cur <= 1) {
         const { [p.id]: _drop, ...rest } = k;
         return rest;
       }
-      return { ...k, [p.id]: { menge: cur - 1, preis: p.preis } };
+      return { ...k, [p.id]: { ...k[p.id], anzahl: cur - 1 } };
     });
 
   const liste = useMemo(
-    () => produkte.filter(p => p.aktiv).map((p) => ({ ...p, menge: korb[p.id]?.menge ?? 0 })),
+    () => produkte.filter(p => p.aktiv).map((p) => ({ ...p, anzahl: korb[p.id]?.anzahl ?? 0 })),
     [produkte, korb]
   );
 
   async function buchen() {
     setMsg(null); setErr(null);
-    if (summe <= 0) { setErr("Bitte Artikel hinzufügen."); return; }
-
+    if (summe <= 0) {
+      setErr("Bitte Artikel hinzufügen.");
+      return;
+    }
     const datum = todayKey();
 
     try {
-      // 1) Tagesartikel hochzählen
+      // Tagesartikel aktualisieren (anzahl & umsatz)
       for (const pid of Object.keys(korb)) {
-        const item = korb[pid];
-        await addToTagesartikel({ datum, produkt_id: pid, menge: item.menge, preis: item.preis });
-      }
-
-      // 2) Barzahlung + Trinkgeld ins Kassenbuch (Rest bleibt offen = Deckel)
-      const inserts = [];
-      if (zuZahlen > 0) inserts.push({ art: "ein", betrag: zuZahlen, text: "Verkauf (Deckel)" });
-      if (trinkgeld > 0) inserts.push({ art: "trinkgeld", betrag: trinkgeld, text: "Trinkgeld" });
-      if (inserts.length) {
-        const { error } = await supabase.from("kassenbuch").insert(inserts);
+        const { anzahl, preis } = korb[pid];
+        const umsatz = Number((anzahl * preis).toFixed(2));
+        // Upsert pro (datum, produkt_id)
+        const { error } = await supabase
+          .from("tagesartikel")
+          .upsert({ datum, produkt_id: pid, anzahl, umsatz }, { onConflict: "datum,produkt_id" });
         if (error) throw error;
       }
 
-      setKorb({}); setGegeben(""); setRestInput(""); setMsg("Verbucht.");
-    } catch (e) { setErr(e.message); }
+      // Barzahlung (ohne Trinkgeld) direkt ins Kassenbuch
+      if (zuZahlen > 0) {
+        const { error } = await supabase
+          .from("kassenbuch")
+          .insert([{ art: "ein", betrag: zuZahlen, text: "Verkauf (Deckel)" }]);
+        if (error) throw error;
+      }
+
+      setKorb({});
+      setGegeben("");
+      setRestInput("");
+      setMsg("Verbucht.");
+    } catch (e) {
+      setErr(e.message);
+    }
   }
 
   return (
@@ -99,64 +110,83 @@ export default function Deckel() {
       {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
       {msg && <div style={{ color: "green" }}>{msg}</div>}
 
-      {/* Produkt-Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {liste.map((p) => (
-          <div key={p.id} className="rounded-2xl border p-3">
-            <div className="font-medium">{p.name}</div>
-            <div className="text-sm text-gray-500 mb-2">{fmtEUR(p.preis)}</div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => sub(p)} className="px-3 py-1 rounded-xl bg-gray-100">−</button>
-              <div className="w-8 text-center">{p.menge}</div>
-              <button onClick={() => add(p)} className="px-3 py-1 rounded-xl bg-blue-600 text-white">+</button>
-            </div>
-          </div>
-        ))}
+      {/* Tabelle der Produkte */}
+      <table className="w-full border rounded-2xl overflow-hidden">
+        <thead className="bg-gray-50">
+          <tr>
+            <th className="p-2 text-left">Artikel</th>
+            <th className="p-2 text-right">EP</th>
+            <th className="p-2 text-center">Anz.</th>
+            <th className="p-2 text-right">GP</th>
+            <th className="p-2 text-center">Aktion</th>
+          </tr>
+        </thead>
+        <tbody>
+          {liste.map((p) => {
+            const gp = p.anzahl * p.preis;
+            return (
+              <tr key={p.id} className="border-t">
+                <td className="p-2">{p.name}</td>
+                <td className="p-2 text-right">{fmtEUR(p.preis)}</td>
+                <td className="p-2 text-center">{p.anzahl}</td>
+                <td className="p-2 text-right">{fmtEUR(gp)}</td>
+                <td className="p-2 text-center">
+                  <div className="inline-flex gap-2">
+                    <button className="px-2 rounded bg-gray-100" onClick={() => sub(p)}>−</button>
+                    <button className="px-2 rounded bg-blue-600 text-white" onClick={() => add(p)}>+</button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+        <tfoot className="bg-gray-50">
+          <tr>
+            <td className="p-2 font-semibold" colSpan={3}>Summe</td>
+            <td className="p-2 text-right font-semibold">{fmtEUR(summe)}</td>
+            <td />
+          </tr>
+        </tfoot>
+      </table>
+
+      {/* Eingaben */}
+      <div className="grid grid-cols-2 gap-3">
+        <label className="flex flex-col gap-1">
+          <span>Gegeben (bar)</span>
+          <input
+            value={gegeben}
+            inputMode="decimal"
+            onChange={(e) => setGegeben(e.target.value)}
+            className="border rounded-xl p-2"
+            placeholder="z. B. 10"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span>Rest (Papierdeckel)</span>
+          <input
+            value={restAuto === toNum(restInput) ? restInput : String(restAuto).replace(".", ",")}
+            onChange={(e) => setRestInput(e.target.value)}
+            inputMode="decimal"
+            className="border rounded-xl p-2"
+            placeholder="z. B. 1,50"
+          />
+        </label>
       </div>
 
-      {/* Summen & Eingaben */}
-      <div className="rounded-2xl border p-3 space-y-3">
-        <Row label="Summe" value={fmtEUR(summe)} />
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Field
-            label="Rest (Papierdeckel)"
-            value={restInput}
-            onChange={setRestInput}
-          />
-          <Field
-            label="Gegeben (bar)"
-            value={gegeben}
-            onChange={setGegeben}
-          />
+      <div className="grid grid-cols-2 gap-3">
+        <div className="flex justify-between border rounded-xl p-2">
+          <span>Zu zahlen</span>
+          <strong>{fmtEUR(zuZahlen)}</strong>
         </div>
-        <Row label="Zu zahlen"  value={fmtEUR(zuZahlen)} />
-        <Row label="Trinkgeld" value={fmtEUR(trinkgeld)} />
+        <div className="flex justify-between border rounded-xl p-2">
+          <span>Offen (Deckel)</span>
+          <strong>{fmtEUR(restAuto)}</strong>
+        </div>
       </div>
 
       <button onClick={buchen} className="w-full py-3 rounded-2xl bg-green-600 text-white font-semibold">
         BUCHEN
       </button>
     </div>
-  );
-}
-
-function Row({ label, value }) {
-  return (
-    <div className="flex items-center justify-between">
-      <div>{label}</div><div>{value}</div>
-    </div>
-  );
-}
-function Field({ label, value, onChange }) {
-  return (
-    <label className="block">
-      <div className="mb-1">{label}</div>
-      <input
-        className="w-full border rounded-xl p-2"
-        value={value}
-        inputMode="decimal"
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </label>
   );
 }

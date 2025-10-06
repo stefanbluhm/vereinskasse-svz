@@ -1,105 +1,147 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabase";
-import { todayKey } from "../lib/dates";
 import { fmtEUR } from "../lib/currency";
+import { todayKey } from "../lib/dates";
 
 export default function Tagesuebersicht() {
-  const [positionen, setPositionen] = useState([]); // [{name, menge, umsatz}]
-  const [bar, setBar] = useState(0);
+  const datum = todayKey();
+  const [rows, setRows] = useState([]); // [{name, anzahl, umsatz}]
   const [err, setErr] = useState(null);
+  const [msg, setMsg] = useState(null);
 
   useEffect(() => {
     (async () => {
       setErr(null);
-      const datum = todayKey();
-
-      // 1) Tagesartikel (verkauft gesamt)
-      const { data: ta, error: e1 } = await supabase
+      // Join tagesartikel + produkte
+      const { data, error } = await supabase
         .from("tagesartikel")
-        .select("produkt_id, menge, umsatz")
+        .select("anzahl,umsatz,produkte(name)")
         .eq("datum", datum);
-      if (e1) return setErr(e1.message);
+      if (error) { setErr(error.message); return; }
+      const list = (data ?? []).map(r => ({
+        name: r.produkte?.name ?? "Unbekannt",
+        anzahl: r.anzahl ?? 0,
+        umsatz: Number(r.umsatz ?? 0)
+      }));
+      setRows(list);
+    })();
+  }, [datum]);
 
-      const { data: prod, error: e2 } = await supabase
-        .from("produkte")
-        .select("id, name, preis, aktiv");
-      if (e2) return setErr(e2.message);
+  const gesamtUmsatz = useMemo(
+    () => rows.reduce((a, b) => a + b.umsatz, 0),
+    [rows]
+  );
 
-      const byId = new Map(prod.map(p => [p.id, p]));
-      const pos = (ta ?? []).map(t => {
-        const p = byId.get(t.produkt_id) || {};
-        const name = p.name ?? "Artikel";
-        const umsatz = (t.umsatz ?? t.menge * (p.preis ?? 0)) || 0;
-        return { name, menge: t.menge ?? 0, umsatz };
-      });
-      setPositionen(pos);
-
-      // 2) Bar-Einnahmen heute aus dem Kassenbuch
-      const { data: kb, error: e3 } = await supabase
+  // Bar bezahlte Umsätze stehen im Kassenbuch (art='ein', text = 'Verkauf (Deckel)')
+  const [barHeute, setBarHeute] = useState(0);
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await supabase
         .from("kassenbuch")
-        .select("betrag, art, created_at")
+        .select("betrag, created_at")
         .eq("art", "ein")
-        .gte("created_at", `${datum} 00:00:00`)
-        .lte("created_at", `${datum} 23:59:59`);
-      if (e3) return setErr(e3.message);
-
-      const sumBar = (kb ?? []).reduce((a, r) => a + (r.betrag ?? 0), 0);
-      setBar(sumBar);
+        .ilike("text", "Verkauf%"); // heutige im Client summieren
+      if (error) return;
+      const heute = new Date().toISOString().slice(0,10);
+      const sum = (data ?? [])
+        .filter(r => (r.created_at ?? "").startsWith(heute))
+        .reduce((a, r) => a + Number(r.betrag ?? 0), 0);
+      setBarHeute(sum);
     })();
   }, []);
 
-  const gesamtVerkauf = useMemo(
-    () => positionen.reduce((a, p) => a + p.umsatz, 0),
-    [positionen]
-  );
-  const offenDeckel = useMemo(
-    () => bar - gesamtVerkauf,                 // NEGATIV = offen
-    [bar, gesamtVerkauf]
-  );
+  const offenDeckel = Math.max(0, gesamtUmsatz - barHeute); // minus-Ausweis automatisch
+
+  async function umsatzInsKassenbuch() {
+    setMsg(null); setErr(null);
+    if (offenDeckel <= 0) { setMsg("Nichts offen."); return; }
+    const { error } = await supabase
+      .from("kassenbuch")
+      .insert([{ art: "ein", betrag: offenDeckel, text: "Tagesabschluss (Deckel offen)" }]);
+    if (error) setErr(error.message);
+    else setMsg("Umsatz übertragen.");
+  }
 
   return (
     <div className="space-y-4">
-      <h2 className="text-lg font-semibold">Tagesübersicht ({todayKey()})</h2>
-      {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
+      <h2 className="text-lg font-semibold">Tagesübersicht ({datum})</h2>
+      {err && <div style={{color:"crimson"}}>Fehler: {err}</div>}
+      {msg && <div style={{color:"green"}}>{msg}</div>}
 
-      {/* Karten je Produkt */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {positionen.map((p, i) => (
-          <div key={i} className="rounded-2xl border p-3">
-            <div className="font-medium">{p.name}</div>
-            <div className="text-sm text-gray-500">Anzahl: {p.menge}</div>
-            <div className="text-sm">Umsatz: {fmtEUR(p.umsatz)}</div>
-          </div>
-        ))}
+      <table className="w-full border rounded-2xl overflow-hidden">
+        <thead className="bg-gray-50">
+          <tr>
+            <th className="p-2 text-left">Artikel</th>
+            <th className="p-2 text-right">Anzahl</th>
+            <th className="p-2 text-right">Umsatz</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} className="border-t">
+              <td className="p-2">{r.name}</td>
+              <td className="p-2 text-right">{r.anzahl}</td>
+              <td className="p-2 text-right">{fmtEUR(r.umsatz)}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot className="bg-gray-50">
+          <tr>
+            <td className="p-2 font-semibold">Gesamtumsatz (verkauft)</td>
+            <td />
+            <td className="p-2 text-right font-semibold">{fmtEUR(gesamtUmsatz)}</td>
+          </tr>
+        </tfoot>
+      </table>
+
+      <div className="grid grid-cols-3 gap-3">
+        <div className="border rounded-xl p-3">
+          <div className="text-sm text-gray-500">Davon bar bezahlt</div>
+          <div className="text-lg font-semibold">{fmtEUR(barHeute)}</div>
+        </div>
+        <div className="border rounded-xl p-3">
+          <div className="text-sm text-gray-500">Offen auf Deckel (heute)</div>
+          <div className="text-lg font-semibold">{fmtEUR(offenDeckel)}</div>
+        </div>
+        <div className="flex items-center">
+          <button onClick={umsatzInsKassenbuch}
+                  className="w-full py-3 rounded-2xl bg-blue-600 text-white font-semibold">
+            Umsatz ins Kassenbuch übertragen
+          </button>
+        </div>
       </div>
 
-      {/* Summenboxen */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <SummaryCard label="Gesamtumsatz (verkauft)" value={fmtEUR(gesamtVerkauf)} />
-        <SummaryCard label="Davon bar bezahlt" value={fmtEUR(bar)} />
-        <SummaryCard
-          label="Offen auf Deckel (heute)"
-          value={fmtEUR(offenDeckel)}          // bei offenen Beträgen negativ
-          emphasize={offenDeckel < 0}
-        />
-      </div>
-
-      {/* Optionaler Shortcut – die eigentliche Buchung machst du im Kassenbuch */}
-      <button
-        className="w-full sm:w-auto px-4 py-2 rounded-2xl bg-blue-600 text-white"
-        onClick={() => window.location.assign("/#/kassenbuch")}
-      >
-        Umsatz ins Kassenbuch übertragen
-      </button>
+      {/* Kassenbestand zählen (Schnellmaske wie gewünscht) */}
+      <KassenZaehlen />
     </div>
   );
 }
 
-function SummaryCard({ label, value, emphasize }) {
+function KassenZaehlen() {
+  const staffel = [200,100,50,20,10,5,2,1,0.5,0.2,0.1];
+  const [counts, setCounts] = useState(Object.fromEntries(staffel.map(v => [v, ""])));
+  const betrag = staffel.reduce((a, v) => a + (Number(counts[v]||0)*v), 0);
+
   return (
-    <div className="rounded-2xl border p-3">
-      <div className="text-sm text-gray-500">{label}</div>
-      <div className={`text-lg font-semibold ${emphasize ? "text-red-600" : ""}`}>{value}</div>
+    <div className="space-y-2">
+      <h3 className="font-semibold">Kassenbestand zählen</h3>
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        {staffel.map((v) => (
+          <label key={v} className="border rounded-xl p-2 flex flex-col gap-1">
+            <span className="text-sm">{v>=1 ? `${v} €` : `${v*100} ct`}</span>
+            <input
+              value={counts[v]}
+              onChange={(e)=>setCounts(s=>({...s,[v]:e.target.value}))}
+              inputMode="numeric"
+              className="border rounded px-2 py-1"
+              placeholder="Anzahl"
+            />
+          </label>
+        ))}
+      </div>
+      <div className="flex justify-end">
+        <div className="border rounded-xl p-2">Gezählt: <strong>{fmtEUR(betrag)}</strong></div>
+      </div>
     </div>
   );
 }

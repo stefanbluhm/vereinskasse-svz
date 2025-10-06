@@ -1,122 +1,123 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabase";
-import { todayKey } from "../lib/dates";
 import { fmtEUR } from "../lib/currency";
 
-const DENOMS = [200,100,50,20,10,5,2,1,0.5,0.2,0.1];
-
 export default function Kassenbuch() {
-  const [barHeute, setBarHeute] = useState(0);     // aus Tagesübersicht (heute bar)
-  const [trinkgeldHeute, setTrinkgeldHeute] = useState(""); // manuell
-  const [eintraege, setEintraege] = useState([]);
-  const [counts, setCounts] = useState(Object.fromEntries(DENOMS.map(v => [v, ""])));
+  const [ein, setEin] = useState([]);
+  const [aus, setAus] = useState([]);
   const [err, setErr] = useState(null);
+  const [msg, setMsg] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      setErr(null);
-      const datum = todayKey();
-
-      // bar bezahlt heute
-      const { data: kbEin, error: e1 } = await supabase
-        .from("kassenbuch").select("betrag, art, text, created_at")
-        .gte("created_at", `${datum} 00:00:00`).lte("created_at", `${datum} 23:59:59`);
-      if (e1) return setErr(e1.message);
-
-      setEintraege(kbEin ?? []);
-
-      const bar = (kbEin ?? []).filter(r => r.art === "ein" && r.text === "Verkauf (Deckel)")
-        .reduce((a, r) => a + (r.betrag ?? 0), 0);
-      setBarHeute(bar);
-    })();
-  }, []);
-
-  const gezahltGezählt = useMemo(() =>
-    DENOMS.reduce((sum, v) => {
-      const n = Number(String(counts[v]).replace(",", "."));
-      const anz = isFinite(n) && n > 0 ? n : 0;
-      return sum + anz * v;
-    }, 0), [counts]);
-
-  async function tagesabschlussBuchen() {
+  const reload = async () => {
     setErr(null);
-    const tg = Number(String(trinkgeldHeute).replace(",", "."));
-    const inserts = [];
-    if (barHeute > 0) inserts.push({ art: "ein", betrag: barHeute, text: "Tagesumsatz (bar)" });
-    if (isFinite(tg) && tg > 0) inserts.push({ art: "trinkgeld", betrag: tg, text: "Trinkgeld (manuell)" });
-    if (!inserts.length) return;
+    const [{ data: e, error: eErr }, { data: a, error: aErr }] = await Promise.all([
+      supabase.from("kassenbuch").select("*").eq("art","ein").order("created_at",{ascending:false}),
+      supabase.from("kassenbuch").select("*").eq("art","aus").order("created_at",{ascending:false}),
+    ]);
+    if (eErr || aErr) { setErr(eErr?.message || aErr?.message); return; }
+    setEin(e ?? []);
+    setAus(a ?? []);
+  };
 
-    const { error } = await supabase.from("kassenbuch").insert(inserts);
-    if (error) setErr(error.message);
-    else window.location.reload();
-  }
+  useEffect(() => { reload(); }, []);
+
+  const sumEin = useMemo(()=> ein.reduce((s,r)=>s+Number(r.betrag||0),0), [ein]);
+  const sumAus = useMemo(()=> aus.reduce((s,r)=>s+Number(r.betrag||0),0), [aus]);
+  const bestand = sumEin - sumAus;
 
   return (
     <div className="space-y-4">
       <h2 className="text-lg font-semibold">Kassenbuch</h2>
       {err && <div style={{color:"crimson"}}>Fehler: {err}</div>}
+      {msg && <div style={{color:"green"}}>{msg}</div>}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <Card label="Gesamtumsatz heute (bar erfasst über Deckel)" value={fmtEUR(barHeute)} />
-        <div className="rounded-2xl border p-3">
-          <div className="text-sm text-gray-500">Trinkgeld (heute, manuell)</div>
-          <input
-            className="mt-2 w-full border rounded-xl p-2"
-            value={trinkgeldHeute}
-            onChange={(e)=>setTrinkgeldHeute(e.target.value)}
-            placeholder="z.B. 1,50"
-            inputMode="decimal"
-          />
-          <button className="mt-3 w-full px-4 py-2 rounded-2xl bg-green-600 text-white"
-                  onClick={tagesabschlussBuchen}>
-            Tagesabschluss ins Kassenbuch buchen
-          </button>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Table title="Einnahmen" rows={ein} sum={sumEin}/>
+        <Table title="Ausgaben" rows={aus} sum={sumAus}/>
       </div>
 
-      {/* Kassenbestand zählen */}
-      <div className="rounded-2xl border p-3">
-        <div className="font-medium mb-2">Kassenbestand zählen</div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-          {DENOMS.map(v => (
-            <label key={v} className="border rounded-xl p-2 flex items-center justify-between gap-2">
-              <div>{v >= 1 ? `${v.toFixed(0)} €` : `${(v*100).toFixed(0)} ct`}</div>
-              <input
-                className="w-20 border rounded-xl p-1 text-right"
-                value={counts[v]}
-                inputMode="numeric"
-                onChange={(e)=>setCounts(c => ({...c, [v]: e.target.value}))}
-                placeholder="Anzahl"
-              />
-            </label>
-          ))}
+      <div className="flex justify-between items-center border rounded-2xl p-3">
+        <div>Bestand (aus Kassenbuch): <strong>{fmtEUR(bestand)}</strong></div>
+        <div className="flex gap-2">
+          <ManualForm onDone={()=>{ setMsg("Buchung gespeichert."); reload(); }}/>
+          <ExportButton rows={[...ein.map(r=>({...r,art:"ein"})), ...aus.map(r=>({...r,art:"aus"}))]}/>
         </div>
-        <div className="mt-3 flex items-center justify-between">
-          <div>Gezählter Bestand</div>
-          <div className="font-semibold">{fmtEUR(gezahltGezählt)}</div>
-        </div>
-      </div>
-
-      {/* Heutige Buchungen */}
-      <div className="rounded-2xl border p-3">
-        <div className="font-medium mb-2">Heute gebuchte Einträge</div>
-        <ul className="space-y-1">
-          {(eintraege ?? []).map((r, i) => (
-            <li key={i} className="flex items-center justify-between">
-              <div>{new Date(r.created_at).toLocaleString()} – {r.text ?? r.art}</div>
-              <div>{fmtEUR(r.betrag ?? 0)}</div>
-            </li>
-          ))}
-        </ul>
       </div>
     </div>
   );
 }
-function Card({label, value}) {
+
+function Table({ title, rows, sum }) {
   return (
-    <div className="rounded-2xl border p-3">
-      <div className="text-sm text-gray-500">{label}</div>
-      <div className="text-lg font-semibold">{value}</div>
+    <div className="border rounded-2xl overflow-hidden">
+      <div className="px-3 py-2 bg-gray-50 font-semibold">{title}</div>
+      <table className="w-full">
+        <thead>
+          <tr className="text-left">
+            <th className="p-2">Datum</th>
+            <th className="p-2">Art</th>
+            <th className="p-2">Text</th>
+            <th className="p-2 text-right">Betrag</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(r=>(
+            <tr key={r.id} className="border-t">
+              <td className="p-2">{new Date(r.created_at).toLocaleString()}</td>
+              <td className="p-2">{r.art}</td>
+              <td className="p-2">{r.text}</td>
+              <td className="p-2 text-right">{fmtEUR(r.betrag)}</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot className="bg-gray-50">
+          <tr>
+            <td className="p-2 font-semibold" colSpan={3}>Summe</td>
+            <td className="p-2 text-right font-semibold">{fmtEUR(sum)}</td>
+          </tr>
+        </tfoot>
+      </table>
     </div>
   );
+}
+
+function ManualForm({ onDone }) {
+  const [art, setArt] = useState("ein");
+  const [betrag, setBetrag] = useState("");
+  const [text, setText] = useState("");
+
+  async function save() {
+    const n = Number(String(betrag).replace(",", "."));
+    if (!Number.isFinite(n) || n <= 0) return;
+    const { error } = await supabase.from("kassenbuch").insert([{ art, betrag: n, text }]);
+    if (!error) { setBetrag(""); setText(""); onDone?.(); }
+  }
+
+  return (
+    <div className="flex gap-2">
+      <select value={art} onChange={(e)=>setArt(e.target.value)} className="border rounded-xl p-2">
+        <option value="ein">Einnahme</option>
+        <option value="aus">Ausgabe</option>
+      </select>
+      <input value={betrag} onChange={(e)=>setBetrag(e.target.value)} placeholder="Betrag"
+             className="border rounded-xl p-2 w-28" inputMode="decimal"/>
+      <input value={text} onChange={(e)=>setText(e.target.value)} placeholder="Text"
+             className="border rounded-xl p-2 w-48"/>
+      <button onClick={save} className="px-3 rounded-2xl bg-blue-600 text-white">Buchen</button>
+    </div>
+  );
+}
+
+function ExportButton({ rows }) {
+  function toCSV() {
+    const head = ["created_at","art","text","betrag"];
+    const body = rows.map(r => [r.created_at, r.art, r.text, String(r.betrag).replace(".", ",")]);
+    const csv = [head, ...body].map(a=>a.map(x=>`"${(x??"").toString().replace(/"/g,'""')}"`).join(";")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `kassenbuch-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+  }
+  return <button onClick={toCSV} className="px-3 rounded-2xl bg-gray-100">Export CSV</button>;
 }
