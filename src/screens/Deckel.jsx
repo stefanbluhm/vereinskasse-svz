@@ -65,8 +65,7 @@ export default function Deckel() {
   );
 
   async function buchen() {
-    setMsg(null);
-    setErr(null);
+    setMsg(null); setErr(null);
     if (summe <= 0) {
       setErr("Bitte Artikel hinzufügen.");
       return;
@@ -74,7 +73,7 @@ export default function Deckel() {
     const datum = todayKey();
 
     try {
-      // Tagesartikel updaten
+      // Nur Tagesartikel updaten – NICHT mehr ins Kassenbuch schreiben!
       for (const pid of Object.keys(korb)) {
         const item = korb[pid];
         await addToTagesartikel({
@@ -85,25 +84,15 @@ export default function Deckel() {
         });
       }
 
-      // Barzahlung + Trinkgeld ins Kassenbuch (optional)
-      const inserts = [];
-      if (zielZuZahlen > 0)
-        inserts.push({ art: "ein", betrag: zielZuZahlen, text: "Verkauf (Deckel)" });
-      if (trinkgeld > 0) inserts.push({ art: "trinkgeld", betrag: trinkgeld, text: "Trinkgeld" });
-
-      if (inserts.length) {
-        const { error } = await supabase.from("kassenbuch").insert(inserts);
-        if (error) throw error;
-      }
-
       setKorb({});
       setGegeben("");
       setRestInput("");
-      setMsg("Verbucht.");
+      setMsg("Verbucht (Tagesübersicht aktualisiert). Kassenbuch bitte im Tab 'Kassenbuch' buchen.");
     } catch (e) {
       setErr(e.message);
     }
   }
+
 
   return (
     <div className="space-y-3">
