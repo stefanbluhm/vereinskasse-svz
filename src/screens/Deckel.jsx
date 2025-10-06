@@ -6,14 +6,17 @@ import { addToTagesartikel } from "../lib/tagesartikel";
 
 export default function Deckel() {
   const [produkte, setProdukte] = useState([]);
-  const [korb, setKorb] = useState({}); // {produkt_id: {menge, preis}}
+  const [korb, setKorb] = useState({}); // { produkt_id: {menge, preis} }
   const [gegeben, setGegeben] = useState("");
   const [restInput, setRestInput] = useState("");
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
 
   useEffect(() => {
-    supabase.from("produkte").select("*").order("name", { ascending: true })
+    supabase
+      .from("produkte")
+      .select("*")
+      .order("name", { ascending: true })
       .then(({ data, error }) => {
         if (error) setErr(error.message);
         else setProdukte(data ?? []);
@@ -41,7 +44,10 @@ export default function Deckel() {
   }, [gegeben, zielZuZahlen]);
 
   const add = (p) =>
-    setKorb((k) => ({ ...k, [p.id]: { menge: (k[p.id]?.menge ?? 0) + 1, preis: p.preis } }));
+    setKorb((k) => ({
+      ...k,
+      [p.id]: { menge: (k[p.id]?.menge ?? 0) + 1, preis: p.preis },
+    }));
 
   const sub = (p) =>
     setKorb((k) => {
@@ -54,12 +60,13 @@ export default function Deckel() {
     });
 
   const liste = useMemo(
-    () => produkte.filter(p => p.aktiv).map((p) => ({ ...p, menge: korb[p.id]?.menge ?? 0 })),
+    () => produkte.filter((p) => p.aktiv).map((p) => ({ ...p, menge: korb[p.id]?.menge ?? 0 })),
     [produkte, korb]
   );
 
   async function buchen() {
-    setMsg(null); setErr(null);
+    setMsg(null);
+    setErr(null);
     if (summe <= 0) {
       setErr("Bitte Artikel hinzufügen.");
       return;
@@ -70,13 +77,20 @@ export default function Deckel() {
       // Tagesartikel updaten
       for (const pid of Object.keys(korb)) {
         const item = korb[pid];
-        await addToTagesartikel({ datum, produkt_id: pid, menge: item.menge, preis: item.preis });
+        await addToTagesartikel({
+          datum,
+          produkt_id: pid,
+          menge: item.menge,
+          preis: item.preis,
+        });
       }
 
       // Barzahlung + Trinkgeld ins Kassenbuch (optional)
       const inserts = [];
-      if (zielZuZahlen > 0) inserts.push({ art: "ein", betrag: zielZuZahlen, text: "Verkauf (Deckel)" });
-      if (trinkgeld > 0)  inserts.push({ art: "trinkgeld", betrag: trinkgeld, text: "Trinkgeld" });
+      if (zielZuZahlen > 0)
+        inserts.push({ art: "ein", betrag: zielZuZahlen, text: "Verkauf (Deckel)" });
+      if (trinkgeld > 0) inserts.push({ art: "trinkgeld", betrag: trinkgeld, text: "Trinkgeld" });
+
       if (inserts.length) {
         const { error } = await supabase.from("kassenbuch").insert(inserts);
         if (error) throw error;
@@ -95,42 +109,130 @@ export default function Deckel() {
     <div className="space-y-3">
       <h2 className="text-lg font-semibold">Deckel</h2>
 
-      {err && <div style={{color:"crimson"}}>Fehler: {err}</div>}
-      {msg && <div style={{color:"green"}}>{msg}</div>}
+      {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
+      {msg && <div style={{ color: "green" }}>{msg}</div>}
 
-      <div className="divide-y rounded-2xl border">
+      {/* PRODUKT-KARTEN als Grid: nebeneinander mit automatischem Umbruch */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+          gap: "12px",
+        }}
+      >
         {liste.map((p) => (
-          <div key={p.id} className="flex items-center justify-between p-2">
-            <div>
-              <div className="font-medium">{p.name}</div>
-              <div className="text-sm text-gray-500">{fmtEUR(p.preis)}</div>
+          <div
+            key={p.id}
+            style={{
+              border: "1px solid #e5e7eb",
+              borderRadius: "14px",
+              padding: "12px",
+              background: "#fafafa",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "space-between",
+              minHeight: 140,
+            }}
+          >
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontWeight: 600 }}>{p.name}</div>
+              <div style={{ fontSize: 14, color: "#6b7280", marginTop: 2 }}>{fmtEUR(p.preis)}</div>
             </div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => sub(p)} className="px-3 py-1 rounded-xl bg-gray-100">−</button>
-              <div className="w-8 text-center">{p.menge}</div>
-              <button onClick={() => add(p)} className="px-3 py-1 rounded-xl bg-blue-600 text-white">+</button>
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "10px",
+                marginTop: 10,
+              }}
+            >
+              <button
+                onClick={() => sub(p)}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  background: "#f3f4f6",
+                  border: "1px solid #e5e7eb",
+                }}
+              >
+                −
+              </button>
+              <div style={{ minWidth: 24, textAlign: "center" }}>{p.menge}</div>
+              <button
+                onClick={() => add(p)}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  background: "#2563eb",
+                  color: "white",
+                  border: "1px solid #1d4ed8",
+                }}
+              >
+                +
+              </button>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="rounded-2xl border p-3 space-y-3">
-        <div className="flex justify-between"><div>Summe</div><div>{fmtEUR(summe)}</div></div>
-        <div className="grid grid-cols-2 gap-2">
+      {/* SUMMEN-/EINGABE-BOX */}
+      <div className="rounded-2xl border p-3 space-y-3" style={{ borderColor: "#e5e7eb" }}>
+        <div className="flex justify-between">
+          <div>Summe</div>
+          <div>{fmtEUR(summe)}</div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <div>
-            <label>Rest (Papierdeckel)</label>
-            <input value={restInput} inputMode="decimal" onChange={(e)=>setRestInput(e.target.value)} className="w-full border rounded-xl p-2" />
+            <label className="block text-sm font-medium">Rest (Papierdeckel)</label>
+            <input
+              value={restInput}
+              inputMode="decimal"
+              onChange={(e) => setRestInput(e.target.value)}
+              className="w-full border rounded-xl p-2"
+              style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 12, padding: 8 }}
+            />
           </div>
           <div>
-            <label>Gegeben (bar)</label>
-            <input value={gegeben} inputMode="decimal" onChange={(e)=>setGegeben(e.target.value)} className="w-full border rounded-xl p-2" />
+            <label className="block text-sm font-medium">Gegeben (bar)</label>
+            <input
+              value={gegeben}
+              inputMode="decimal"
+              onChange={(e) => setGegeben(e.target.value)}
+              className="w-full border rounded-xl p-2"
+              style={{ width: "100%", border: "1px solid #e5e7eb", borderRadius: 12, padding: 8 }}
+            />
           </div>
         </div>
-        <div className="flex justify-between"><div>Zu zahlen</div><div>{fmtEUR(zielZuZahlen)}</div></div>
-        <div className="flex justify-between"><div>Trinkgeld</div><div>{fmtEUR(trinkgeld)}</div></div>
+
+        <div className="flex justify-between">
+          <div>Zu zahlen</div>
+          <div>{fmtEUR(zielZuZahlen)}</div>
+        </div>
+        <div className="flex justify-between">
+          <div>Trinkgeld</div>
+          <div>{fmtEUR(trinkgeld)}</div>
+        </div>
       </div>
 
-      <button onClick={buchen} className="w-full py-3 rounded-2xl bg-green-600 text-white font-semibold">BUCHEN</button>
+      <button
+        onClick={buchen}
+        className="w-full py-3 rounded-2xl bg-green-600 text-white font-semibold"
+        style={{
+          width: "100%",
+          padding: "12px 16px",
+          borderRadius: 14,
+          background: "#16a34a",
+          color: "white",
+          fontWeight: 600,
+          border: 0,
+        }}
+      >
+        BUCHEN
+      </button>
     </div>
   );
 }
