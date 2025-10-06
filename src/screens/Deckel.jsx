@@ -190,3 +190,20 @@ export default function Deckel() {
     </div>
   );
 }
+// Hilfsfunktion (oben im File)
+const parseDec = (v) => {
+  const n = Number(String(v ?? "").replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+};
+
+// ... im Komponenten-Body:
+useEffect(() => {
+  const g = parseDec(gegeben);
+  if (g > 0) {
+    // offener Betrag = Summe - gegeben, minimal 0
+    const offen = Math.max(0, summe - g);
+    // wenn offen > 0 -> Rest automatisch setzen, sonst leeren
+    setRestInput(offen > 0 ? offen.toFixed(2) : "");
+  }
+}, [gegeben, summe]);
+

@@ -1,6 +1,22 @@
 import { supabase } from "../supabase";
 
 /**
+ * Summiert eine Artikelmenge in der Tagesübersicht auf.
+ * @param {{datum: string, produkt_id: string, menge: number, preis: number}} p
+ */
+export async function addToTagesartikel({ datum, produkt_id, menge, preis }) {
+  const anzahl = menge;
+  const umsatz = Number((menge * preis).toFixed(2));
+  const { error } = await supabase.rpc("add_to_tagesartikel", {
+    p_datum: datum,
+    p_produkt_id: produkt_id,
+    p_anzahl: anzahl,
+    p_umsatz: umsatz,
+  });
+  if (error) throw error;
+}
+
+/**
  * Erhöht für (datum, produkt_id) die Anzahl + Umsatz.
  * Falls noch kein Datensatz existiert -> insert.
  */
