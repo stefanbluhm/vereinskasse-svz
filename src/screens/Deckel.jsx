@@ -1,41 +1,110 @@
+// src/screens/Deckel.jsx
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabase";
 import { fmtEUR } from "../lib/currency";
 import { todayKey } from "../lib/dates";
 import { addToTagesartikel } from "../lib/tagesartikel";
 
+// ---------- kleine Hilfen ----------
+const parseEuro = (v) => {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return isFinite(v) ? v : 0;
+  const s = String(v).trim().replace(",", ".");
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+};
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+
+// -----------------------------------
+
 export default function Deckel() {
   const [produkte, setProdukte] = useState([]);
-  const [korb, setKorb] = useState({}); // { produkt_id: { menge, preis, name } }
-  const [gegeben, setGegeben] = useState("");   // bar
-  const [rest, setRest] = useState("");         // Papierdeckel (auto-berechnet)
+  const [korb, setKorb] = useState({}); // { [produkt_id]: { menge, preis, name } }
+  const [gegeben, setGegeben] = useState("");
+  const [restInput, setRestInput] = useState("");
   const [msg, setMsg] = useState(null);
   const [err, setErr] = useState(null);
 
+  // Produkte laden
   useEffect(() => {
+    let alive = true;
     (async () => {
       const { data, error } = await supabase
         .from("produkte")
         .select("*")
         .order("name", { ascending: true });
+      if (!alive) return;
       if (error) setErr(error.message);
-      setProdukte(data ?? []);
+      else setProdukte(data ?? []);
     })();
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  const summe = useMemo(
-    () => Object.values(korb).reduce((a, b) => a + b.menge * b.preis, 0),
-    [korb]
+  // Summe
+  const summe = useMemo(() => {
+    return Object.values(korb).reduce((a, b) => a + b.menge * b.preis, 0);
+  }, [korb]);
+
+  // Automatik: Rest bei Änderung von Gegeben oder Summe sinnvoll setzen
+  useEffect(() => {
+    const g = parseEuro(gegeben);
+    const curRest = parseEuro(restInput);
+
+    // Betrag, der *jetzt* bar zu zahlen wäre, wenn wir den aktuellen Rest annehmen
+    const neededNow = Math.max(0, summe - curRest);
+
+    let newRest = curRest;
+
+    if (g >= summe) {
+      // genug bar => kein offener Deckel
+      newRest = 0;
+    } else if (g > 0 && g < neededNow) {
+      // zu wenig bar => fehlenden Teil automatisch als Rest (Papierdeckel)
+      newRest = summe - g;
+    }
+
+    newRest = clamp(newRest, 0, summe);
+
+    if (Math.abs(newRest - curRest) > 1e-6) {
+      setRestInput(String(newRest));
+    }
+  }, [gegeben, summe]); // absichtlich nicht von restInput abhängig
+
+  // abgeleitete Werte
+  const rest = useMemo(
+    () => clamp(parseEuro(restInput), 0, summe),
+    [restInput, summe]
   );
 
-  // Menge +/- --------------------------------
-  const plus = (p) =>
+  const zuZahlen = useMemo(() => Math.max(0, summe - rest), [summe, rest]);
+
+  const trinkgeld = useMemo(() => {
+    const g = parseEuro(gegeben);
+    return Math.max(0, g - zuZahlen);
+  }, [gegeben, zuZahlen]);
+
+  const offenDeckel = rest;
+
+  // Anzeige-Liste
+  const liste = useMemo(() => {
+    return produkte
+      .filter((p) => p.aktiv)
+      .map((p) => ({
+        ...p,
+        menge: korb[p.id]?.menge ?? 0,
+      }));
+  }, [produkte, korb]);
+
+  // +/−
+  const add = (p) =>
     setKorb((k) => ({
       ...k,
       [p.id]: { menge: (k[p.id]?.menge ?? 0) + 1, preis: p.preis, name: p.name },
     }));
 
-  const minus = (p) =>
+  const sub = (p) =>
     setKorb((k) => {
       const cur = k[p.id]?.menge ?? 0;
       if (cur <= 1) {
@@ -45,156 +114,177 @@ export default function Deckel() {
       return { ...k, [p.id]: { menge: cur - 1, preis: p.preis, name: p.name } };
     });
 
-  // „Rest (Papierdeckel)“ automatisch befüllen,
-  // wenn weniger gegeben wurde als zu zahlen ist.
-  useEffect(() => {
-    const g = Number(String(gegeben).replace(",", ".")) || 0;
-    const zuZahlen = Math.max(0, summe - (Number(rest) || 0));
-    const offenerTeil = Math.max(0, summe - g);
-    if (g > 0 && offenerTeil > 0) {
-      setRest(offenerTeil.toFixed(2));
-    }
-  }, [gegeben, summe]); // bewusst keine Abhängigkeit von rest
-
-  const liste = useMemo(
-    () =>
-      produkte.map((p) => ({
-        ...p,
-        menge: korb[p.id]?.menge ?? 0,
-        gp: (korb[p.id]?.menge ?? 0) * p.preis,
-      })),
-    [produkte, korb]
-  );
-
+  // Buchen
   async function buchen() {
     setMsg(null);
     setErr(null);
+
+    if (summe <= 0) {
+      setErr("Bitte Artikel hinzufügen.");
+      return;
+    }
+
     const datum = todayKey();
 
     try {
-      if (summe <= 0) throw new Error("Bitte Artikel auswählen.");
-
-      // 1) Tagesartikel fortschreiben
+      // 1) Tagesartikel upserten
       for (const pid of Object.keys(korb)) {
-        const item = korb[pid];
+        const item = korb[pid]; // {menge, preis}
+        const anzahl = item.menge;
+        const umsatz = anzahl * item.preis;
+
+        // nutzt deine helper-Funktion, die ON CONFLICT (datum, produkt_id) erhöht
         await addToTagesartikel({
           datum,
           produkt_id: pid,
-          menge: item.menge,
-          preis: item.preis,
+          anzahl,
+          umsatz,
         });
       }
 
-      // 2) Offener Deckel (Papier) heute speichern
-      const restNum =
-        Number(String(rest).replace(",", ".")) > 0
-          ? Number(String(rest).replace(",", "."))
-          : 0;
-
-      if (restNum > 0) {
-        const { error: e2 } = await supabase
+      // 2) Papierdeckel (falls offen)
+      if (offenDeckel > 0) {
+        // upsert für deckel_offen: pro Tag nur ein Eintrag
+        const { error: dErr } = await supabase
           .from("deckel_offen")
-          .insert({ datum, betrag: restNum });
-        if (e2) throw e2;
+          .upsert(
+            { datum, betrag: offenDeckel },
+            { onConflict: "datum", ignoreDuplicates: false }
+          );
+        if (dErr) throw dErr;
       }
 
-      // 3) Optional: Trinkgeld ins Kassenbuch (nur, wenn wirklich > 0)
-      // (Kannst du deaktivieren, wenn vorerst nicht gewünscht.)
-      const gNum = Number(String(gegeben).replace(",", ".")) || 0;
-      const zuZahlen = Math.max(0, summe - restNum);
-      const trinkgeld = Math.max(0, gNum - zuZahlen);
+      // 3) Kassenbuch: Barzahlung und Trinkgeld
+      const inserts = [];
+      if (zuZahlen > 0) {
+        inserts.push({
+          art: "ein",
+          betrag: zuZahlen,
+          text: "Verkauf (Deckel)",
+        });
+      }
       if (trinkgeld > 0) {
-        const { error: e3 } = await supabase
-          .from("kassenbuch")
-          .insert({ art: "trinkgeld", betrag: trinkgeld, text: "Trinkgeld" });
-        if (e3) throw e3;
+        inserts.push({
+          art: "trinkgeld",
+          betrag: trinkgeld,
+          text: "Trinkgeld",
+        });
+      }
+      if (inserts.length) {
+        const { error: kErr } = await supabase.from("kassenbuch").insert(inserts);
+        if (kErr) throw kErr;
       }
 
-      // UI reset
+      // 4) UI zurücksetzen
       setKorb({});
       setGegeben("");
-      setRest("");
+      setRestInput("");
       setMsg("Verbucht.");
     } catch (e) {
-      setErr(e.message);
+      setErr(e.message ?? String(e));
     }
   }
 
   return (
-    <div>
-      <h2>Deckel</h2>
+    <div className="space-y-4">
+      <h2 className="text-xl font-semibold">Deckel</h2>
+
       {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
       {msg && <div style={{ color: "green" }}>{msg}</div>}
 
-      <table style={{ width: "100%", maxWidth: 800 }}>
-        <thead>
-          <tr>
-            <th style={{ textAlign: "left" }}>Artikel</th>
-            <th>EP</th>
-            <th>Anz.</th>
-            <th>GP</th>
-            <th>Aktion</th>
-          </tr>
-        </thead>
-        <tbody>
-          {liste.map((p) => (
-            <tr key={p.id}>
-              <td>{p.name}</td>
-              <td>{fmtEUR(p.preis)}</td>
-              <td>{p.menge}</td>
-              <td>{fmtEUR(p.gp)}</td>
-              <td>
-                <button onClick={() => minus(p)}>−</button>{" "}
-                <button onClick={() => plus(p)}>+</button>
-              </td>
+      <div className="overflow-x-auto rounded-2xl border">
+        <table className="min-w-[600px] w-full">
+          <thead>
+            <tr className="text-left">
+              <th className="p-2">Artikel</th>
+              <th className="p-2">EP</th>
+              <th className="p-2">Anz.</th>
+              <th className="p-2">GP</th>
+              <th className="p-2">Aktion</th>
             </tr>
-          ))}
-          <tr>
-            <td colSpan={3} style={{ textAlign: "right" }}>
-              <b>Summe</b>
-            </td>
-            <td colSpan={2}>{fmtEUR(summe)}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div style={{ maxWidth: 800, marginTop: 12 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <label>
-            Gegeben (bar)
-            <input
-              value={gegeben}
-              onChange={(e) => setGegeben(e.target.value)}
-              inputMode="decimal"
-              placeholder="z. B. 45,00"
-              style={{ width: "100%" }}
-            />
-          </label>
-          <label>
-            Rest (Papierdeckel)
-            <input
-              value={rest}
-              onChange={(e) => setRest(e.target.value)}
-              inputMode="decimal"
-              placeholder="z. B. 1,50"
-              style={{ width: "100%" }}
-            />
-          </label>
-        </div>
-
-        <div style={{ marginTop: 6 }}>
-          <div>
-            Zu zahlen <b>{fmtEUR(Math.max(0, summe - (Number(rest) || 0)))}</b>
-          </div>
-          <div>
-            Offen (Deckel) <b>{fmtEUR(Number(rest) || 0)}</b>
-          </div>
-        </div>
-
-        <button onClick={buchen} style={{ marginTop: 10 }}>
-          BUCHEN
-        </button>
+          </thead>
+          <tbody>
+            {liste.map((p) => (
+              <tr key={p.id} className="border-t">
+                <td className="p-2">{p.name}</td>
+                <td className="p-2">{fmtEUR(p.preis)}</td>
+                <td className="p-2">{p.menge}</td>
+                <td className="p-2">{fmtEUR(p.menge * p.preis)}</td>
+                <td className="p-2">
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => sub(p)}
+                      className="px-3 py-1 rounded-xl border"
+                      aria-label={`${p.name} verringern`}
+                    >
+                      −
+                    </button>
+                    <button
+                      onClick={() => add(p)}
+                      className="px-3 py-1 rounded-xl bg-blue-600 text-white"
+                      aria-label={`${p.name} erhöhen`}
+                    >
+                      +
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            <tr className="border-t font-semibold">
+              <td className="p-2" colSpan={3}>
+                Summe
+              </td>
+              <td className="p-2">{fmtEUR(summe)}</td>
+              <td className="p-2" />
+            </tr>
+          </tbody>
+        </table>
       </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">Gegeben (bar)</label>
+          <input
+            value={gegeben}
+            onChange={(e) => setGegeben(e.target.value)}
+            inputMode="decimal"
+            className="w-full border rounded-xl p-2"
+            placeholder="z. B. 45,00"
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-gray-600 mb-1">Rest (Papierdeckel)</label>
+          <input
+            value={restInput}
+            onChange={(e) => setRestInput(e.target.value)}
+            inputMode="decimal"
+            className="w-full border rounded-xl p-2"
+            placeholder="z. B. 1,50"
+          />
+        </div>
+      </div>
+
+      <div className="rounded-2xl border p-3 space-y-2">
+        <div className="flex justify-between">
+          <div>Zu zahlen</div>
+          <div>{fmtEUR(zuZahlen)}</div>
+        </div>
+        <div className="flex justify-between">
+          <div>Offen (Deckel)</div>
+          <div>{fmtEUR(offenDeckel)}</div>
+        </div>
+        <div className="flex justify-between">
+          <div>Trinkgeld</div>
+          <div>{fmtEUR(trinkgeld)}</div>
+        </div>
+      </div>
+
+      <button
+        onClick={buchen}
+        className="w-full py-3 rounded-2xl bg-green-600 text-white font-semibold"
+      >
+        BUCHEN
+      </button>
     </div>
   );
 }
