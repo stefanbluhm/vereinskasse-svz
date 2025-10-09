@@ -1,147 +1,180 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../supabase";
-import { fmtEUR } from "../lib/currency";
 import { todayKey } from "../lib/dates";
+import { fmtEUR } from "../lib/currency";
 
 export default function Tagesuebersicht() {
-  const datum = todayKey();
-  const [rows, setRows] = useState([]); // [{name, anzahl, umsatz}]
+  const [zeilen, setZeilen] = useState([]); // [{name, ep, anzahl, gp}]
+  const [offenDeckel, setOffenDeckel] = useState(0);
   const [err, setErr] = useState(null);
   const [msg, setMsg] = useState(null);
+
+  // ===== ZÄHLMASKE =====
+  const NOMINALS = [
+    { label: "200 €", value: 200 },
+    { label: "100 €", value: 100 },
+    { label: "50 €",  value: 50 },
+    { label: "20 €",  value: 20 },
+    { label: "10 €",  value: 10 },
+    { label: "5 €",   value: 5 },
+    { label: "2 €",   value: 2 },
+    { label: "1 €",   value: 1 },
+    { label: "50 ct", value: 0.5 },
+    { label: "20 ct", value: 0.2 },
+    { label: "10 ct", value: 0.1 },
+  ];
+  const [counts, setCounts] = useState(
+    NOMINALS.reduce((acc, n) => ({ ...acc, [n.value]: "" }), {})
+  );
+  const gezahltGezählt = useMemo(() => {
+    return NOMINALS.reduce((sum, n) => {
+      const c = Number(String(counts[n.value]).replace(",", ".")) || 0;
+      return sum + c * n.value;
+    }, 0);
+  }, [counts]);
+
+  const datum = todayKey();
 
   useEffect(() => {
     (async () => {
       setErr(null);
-      // Join tagesartikel + produkte
+      // Aggregation je Produkt (heute)
       const { data, error } = await supabase
         .from("tagesartikel")
-        .select("anzahl,umsatz,produkte(name)")
+        .select("anzahl, umsatz, produkt_id, produkte(name, preis:preis)")
         .eq("datum", datum);
-      if (error) { setErr(error.message); return; }
-      const list = (data ?? []).map(r => ({
-        name: r.produkte?.name ?? "Unbekannt",
-        anzahl: r.anzahl ?? 0,
-        umsatz: Number(r.umsatz ?? 0)
-      }));
-      setRows(list);
+
+      if (error) return setErr(error.message);
+
+      const map = new Map();
+      (data ?? []).forEach((r) => {
+        const key = r.produkt_id;
+        const name = r.produkte?.name ?? "";
+        const ep = Number(r.produkte?.preis) || 0;
+        const anzahl = Number(r.anzahl) || 0;
+        const gp = Number(r.umsatz) || anzahl * ep;
+        const cur = map.get(key) || { name, ep, anzahl: 0, gp: 0 };
+        cur.anzahl += anzahl;
+        cur.gp += gp;
+        map.set(key, cur);
+      });
+      setZeilen([...map.values()].sort((a, b) => a.name.localeCompare(b.name)));
+
+      // Summe offener Deckel (heute)
+      const { data: d2, error: e2 } = await supabase
+        .from("deckel_offen")
+        .select("betrag")
+        .eq("datum", datum);
+      if (e2) return setErr(e2.message);
+      const sumOffen = (d2 ?? []).reduce((a, b) => a + Number(b.betrag || 0), 0);
+      setOffenDeckel(sumOffen);
     })();
   }, [datum]);
 
   const gesamtUmsatz = useMemo(
-    () => rows.reduce((a, b) => a + b.umsatz, 0),
-    [rows]
+    () => zeilen.reduce((a, z) => a + z.gp, 0),
+    [zeilen]
   );
-
-  // Bar bezahlte Umsätze stehen im Kassenbuch (art='ein', text = 'Verkauf (Deckel)')
-  const [barHeute, setBarHeute] = useState(0);
-  useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase
-        .from("kassenbuch")
-        .select("betrag, created_at")
-        .eq("art", "ein")
-        .ilike("text", "Verkauf%"); // heutige im Client summieren
-      if (error) return;
-      const heute = new Date().toISOString().slice(0,10);
-      const sum = (data ?? [])
-        .filter(r => (r.created_at ?? "").startsWith(heute))
-        .reduce((a, r) => a + Number(r.betrag ?? 0), 0);
-      setBarHeute(sum);
-    })();
-  }, []);
-
-  const offenDeckel = Math.max(0, gesamtUmsatz - barHeute); // minus-Ausweis automatisch
+  const barHeute = Math.max(0, gesamtUmsatz - offenDeckel);
+  const differenz = gezahltGezählt - barHeute;
 
   async function umsatzInsKassenbuch() {
-    setMsg(null); setErr(null);
-    if (offenDeckel <= 0) { setMsg("Nichts offen."); return; }
-    const { error } = await supabase
-      .from("kassenbuch")
-      .insert([{ art: "ein", betrag: offenDeckel, text: "Tagesabschluss (Deckel offen)" }]);
-    if (error) setErr(error.message);
-    else setMsg("Umsatz übertragen.");
+    setMsg(null);
+    setErr(null);
+    try {
+      if (barHeute <= 0) throw new Error("Kein barer Umsatz für heute.");
+      const { error } = await supabase
+        .from("kassenbuch")
+        .insert({ art: "ein", betrag: barHeute, text: "Tagesabschluss (bar)" });
+      if (error) throw error;
+      setMsg("Umsatz übertragen.");
+    } catch (e) {
+      setErr(e.message);
+    }
   }
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-lg font-semibold">Tagesübersicht ({datum})</h2>
-      {err && <div style={{color:"crimson"}}>Fehler: {err}</div>}
-      {msg && <div style={{color:"green"}}>{msg}</div>}
+    <div>
+      <h2>Tagesübersicht ({datum})</h2>
+      {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
+      {msg && <div style={{ color: "green" }}>{msg}</div>}
 
-      <table className="w-full border rounded-2xl overflow-hidden">
-        <thead className="bg-gray-50">
+      <table style={{ width: "100%", maxWidth: 800 }}>
+        <thead>
           <tr>
-            <th className="p-2 text-left">Artikel</th>
-            <th className="p-2 text-right">Anzahl</th>
-            <th className="p-2 text-right">Umsatz</th>
+            <th style={{ textAlign: "left" }}>Artikel</th>
+            <th>EP</th>
+            <th>Anz.</th>
+            <th>GP</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
-            <tr key={i} className="border-t">
-              <td className="p-2">{r.name}</td>
-              <td className="p-2 text-right">{r.anzahl}</td>
-              <td className="p-2 text-right">{fmtEUR(r.umsatz)}</td>
+          {zeilen.map((z) => (
+            <tr key={z.name}>
+              <td>{z.name}</td>
+              <td>{fmtEUR(z.ep)}</td>
+              <td>{z.anzahl}</td>
+              <td>{fmtEUR(z.gp)}</td>
             </tr>
           ))}
-        </tbody>
-        <tfoot className="bg-gray-50">
           <tr>
-            <td className="p-2 font-semibold">Gesamtumsatz (verkauft)</td>
-            <td />
-            <td className="p-2 text-right font-semibold">{fmtEUR(gesamtUmsatz)}</td>
+            <td colSpan={3} style={{ textAlign: "right" }}>
+              <b>Gesamtumsatz (verkauft)</b>
+            </td>
+            <td>{fmtEUR(gesamtUmsatz)}</td>
           </tr>
-        </tfoot>
+          <tr>
+            <td colSpan={3} style={{ textAlign: "right" }}>
+              Offen auf Deckel (heute)
+            </td>
+            <td>{fmtEUR(offenDeckel)}</td>
+          </tr>
+          <tr>
+            <td colSpan={3} style={{ textAlign: "right" }}>
+              Davon bar bezahlt
+            </td>
+            <td>{fmtEUR(barHeute)}</td>
+          </tr>
+        </tbody>
       </table>
 
-      <div className="grid grid-cols-3 gap-3">
-        <div className="border rounded-xl p-3">
-          <div className="text-sm text-gray-500">Davon bar bezahlt</div>
-          <div className="text-lg font-semibold">{fmtEUR(barHeute)}</div>
+      {/* ===== ZÄHLMASKE ===== */}
+      <div style={{ marginTop: 16, maxWidth: 800 }}>
+        <h3>Kassenbestand zählen</h3>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(140px, 1fr))",
+            gap: 8,
+          }}
+        >
+          {NOMINALS.map((n) => (
+            <div key={n.value}>
+              <label style={{ display: "block", fontSize: 12, color: "#555" }}>
+                {n.label} – Anzahl
+              </label>
+              <input
+                value={counts[n.value]}
+                onChange={(e) =>
+                  setCounts((c) => ({ ...c, [n.value]: e.target.value }))
+                }
+                inputMode="numeric"
+                placeholder="0"
+                style={{ width: "100%" }}
+              />
+            </div>
+          ))}
         </div>
-        <div className="border rounded-xl p-3">
-          <div className="text-sm text-gray-500">Offen auf Deckel (heute)</div>
-          <div className="text-lg font-semibold">{fmtEUR(offenDeckel)}</div>
-        </div>
-        <div className="flex items-center">
-          <button onClick={umsatzInsKassenbuch}
-                  className="w-full py-3 rounded-2xl bg-blue-600 text-white font-semibold">
-            Umsatz ins Kassenbuch übertragen
-          </button>
+
+        <div style={{ marginTop: 8 }}>
+          <div>Gezählt: <b>{fmtEUR(gezahltGezählt)}</b></div>
+          <div>Abgleich (gezählt – bar bezahlt): <b>{fmtEUR(differenz)}</b></div>
         </div>
       </div>
 
-      {/* Kassenbestand zählen (Schnellmaske wie gewünscht) */}
-      <KassenZaehlen />
-    </div>
-  );
-}
-
-function KassenZaehlen() {
-  const staffel = [200,100,50,20,10,5,2,1,0.5,0.2,0.1];
-  const [counts, setCounts] = useState(Object.fromEntries(staffel.map(v => [v, ""])));
-  const betrag = staffel.reduce((a, v) => a + (Number(counts[v]||0)*v), 0);
-
-  return (
-    <div className="space-y-2">
-      <h3 className="font-semibold">Kassenbestand zählen</h3>
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-        {staffel.map((v) => (
-          <label key={v} className="border rounded-xl p-2 flex flex-col gap-1">
-            <span className="text-sm">{v>=1 ? `${v} €` : `${v*100} ct`}</span>
-            <input
-              value={counts[v]}
-              onChange={(e)=>setCounts(s=>({...s,[v]:e.target.value}))}
-              inputMode="numeric"
-              className="border rounded px-2 py-1"
-              placeholder="Anzahl"
-            />
-          </label>
-        ))}
-      </div>
-      <div className="flex justify-end">
-        <div className="border rounded-xl p-2">Gezählt: <strong>{fmtEUR(betrag)}</strong></div>
-      </div>
+      <button onClick={umsatzInsKassenbuch} style={{ marginTop: 12 }}>
+        Umsatz ins Kassenbuch übertragen
+      </button>
     </div>
   );
 }

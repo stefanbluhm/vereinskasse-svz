@@ -1,1 +1,4 @@
-export const todayKey = () => new Date().toISOString().slice(0, 10);
+export function todayKey() {
+  const d = new Date();
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+}
