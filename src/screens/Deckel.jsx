@@ -78,12 +78,7 @@ export default function Deckel() {
   );
 
   const zuZahlen = useMemo(() => Math.max(0, summe - rest), [summe, rest]);
-
-  const trinkgeld = useMemo(() => {
-    const g = parseEuro(gegeben);
-    return Math.max(0, g - zuZahlen);
-  }, [gegeben, zuZahlen]);
-
+  const trinkgeld = useMemo(() => Math.max(0, parseEuro(gegeben) - zuZahlen), [gegeben, zuZahlen]);
   const offenDeckel = rest;
 
   // Anzeige-Liste
@@ -113,7 +108,7 @@ export default function Deckel() {
       return { ...k, [p.id]: { menge: cur - 1, preis: p.preis, name: p.name } };
     });
 
-  // Buchen
+  // Buchen (nur Tagesartikel + Deckel offen)
   async function buchen() {
     setMsg(null);
     setErr(null);
@@ -142,7 +137,6 @@ export default function Deckel() {
 
       // 2) Papierdeckel (falls offen)
       if (offenDeckel > 0) {
-        // pro Tag nur ein Eintrag
         const { error: dErr } = await supabase
           .from("deckel_offen")
           .upsert(
@@ -152,28 +146,11 @@ export default function Deckel() {
         if (dErr) throw dErr;
       }
 
-      // 3) Kassenbuch: Barzahlung und Trinkgeld
-      const inserts = [];
-      if (zuZahlen > 0) {
-        inserts.push({
-          art: "ein",
-          betrag: Number(zuZahlen.toFixed(2)),
-          text: "Verkauf (Deckel)",
-        });
-      }
-      if (trinkgeld > 0) {
-        inserts.push({
-          art: "trinkgeld",
-          betrag: Number(trinkgeld.toFixed(2)),
-          text: "Trinkgeld",
-        });
-      }
-      if (inserts.length) {
-        const { error: kErr } = await supabase.from("kassenbuch").insert(inserts);
-        if (kErr) throw kErr;
-      }
+      // WICHTIG:
+      // KEINE Einträge in "kassenbuch" hier!
+      // Barumsatz für heute wird ausschließlich in der Tagesübersicht per Button gebucht.
 
-      // 4) UI zurücksetzen
+      // UI zurücksetzen
       setKorb({});
       setGegeben("");
       setRestInput("");
