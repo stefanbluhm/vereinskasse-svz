@@ -14,7 +14,6 @@ const parseEuro = (v) => {
   return isFinite(n) ? n : 0;
 };
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
-
 // -----------------------------------
 
 export default function Deckel() {
@@ -130,10 +129,9 @@ export default function Deckel() {
       // 1) Tagesartikel upserten
       for (const pid of Object.keys(korb)) {
         const item = korb[pid]; // {menge, preis}
-        const anzahl = item.menge;
-        const umsatz = anzahl * item.preis;
+        const anzahl = Number(item.menge) || 0;
+        const umsatz = Number((anzahl * Number(item.preis || 0)).toFixed(2));
 
-        // nutzt deine helper-Funktion, die ON CONFLICT (datum, produkt_id) erhöht
         await addToTagesartikel({
           datum,
           produkt_id: pid,
@@ -144,11 +142,11 @@ export default function Deckel() {
 
       // 2) Papierdeckel (falls offen)
       if (offenDeckel > 0) {
-        // upsert für deckel_offen: pro Tag nur ein Eintrag
+        // pro Tag nur ein Eintrag
         const { error: dErr } = await supabase
           .from("deckel_offen")
           .upsert(
-            { datum, betrag: offenDeckel },
+            { datum, betrag: Number(offenDeckel.toFixed(2)) },
             { onConflict: "datum", ignoreDuplicates: false }
           );
         if (dErr) throw dErr;
@@ -159,14 +157,14 @@ export default function Deckel() {
       if (zuZahlen > 0) {
         inserts.push({
           art: "ein",
-          betrag: zuZahlen,
+          betrag: Number(zuZahlen.toFixed(2)),
           text: "Verkauf (Deckel)",
         });
       }
       if (trinkgeld > 0) {
         inserts.push({
           art: "trinkgeld",
-          betrag: trinkgeld,
+          betrag: Number(trinkgeld.toFixed(2)),
           text: "Trinkgeld",
         });
       }
